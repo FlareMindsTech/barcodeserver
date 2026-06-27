@@ -1,0 +1,30 @@
+{
+  "name": "barcodeserver",
+  "version": "1.0.0",
+  "description": "",
+  "homepage": "https://github.com/FlareMindsTech/barcodeserver#readme",
+  "bugs": {
+    "url": "https://github.com/FlareMindsTech/barcodeserver/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FlareMindsTech/barcodeserver.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+  "test": "echo \"Error: no test specified\" && exit 1",
+  "start": "node index.js",
+  "dev": "nodemon index.js"
+},
+  "dependencies": {
+    "body-parser": "^2.3.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "mongoose": "^9.7.2",
+    "nodemon": "^3.1.14"
+  }
+}
