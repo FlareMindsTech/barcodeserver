@@ -3,7 +3,7 @@ import bodyParser from 'body-parser';
 import mongoose from 'mongoose'
 import dotenv from "dotenv"
 import cors from "cors"
-
+import productRouter from "./Routers/ProductRouter.js";
 
 
 dotenv.config();
@@ -23,7 +23,7 @@ mongoose.connect(process.env.MONGO_URI)
   res.send("welcome"); 
 });
 
-// app.use("/api/user", user)
+app.use("/api/products", productRouter);
 
 
 

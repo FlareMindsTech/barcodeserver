@@ -94,7 +94,7 @@ const productSchema = new mongoose.Schema(
 
 productSchema.index({ productName: 1 });
 productSchema.index({ category: 1 });
-productSchema.index({ "variants.barcode": 1 });
+
 
 const Product = mongoose.model("Product", productSchema);
 
