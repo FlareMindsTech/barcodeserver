@@ -1,222 +1,71 @@
-const VALID_GST = [0, 5, 12, 18, 28];
+/**
+ * @file ProductValidation.js
+ * @description Input validation functions for Product management.
+ */
 
-const VALID_SIZES = [
-    "XS",
-    "S",
-    "M",
-    "L",
-    "XL",
-    "XXL",
-    "3XL",
-    "4XL",
-    "5XL"
-];
+const VALID_SIZES = ['XS', 'S', 'M', 'L', 'XL', 'XXL'];
 
-// ===============================
-// Convert Text to Title Case
-// ===============================
-
-const titleCase = (text = "") => {
-    return text
-        .trim()
-        .replace(/\s+/g, " ")
-        .toLowerCase()
-        .replace(/\b\w/g, (char) => char.toUpperCase());
+/**
+ * Validate product creation input
+ */
+export const validateProductCreation = (body) => {
+  if (!body.productName || typeof body.productName !== 'string' || body.productName.trim() === '') {
+    return { status: false, message: 'Product Name is required.' };
+  }
+  if (!body.brandId) {
+    return { status: false, message: 'Brand is required.' };
+  }
+  if (!body.categoryId) {
+    return { status: false, message: 'Category is required.' };
+  }
+  if (!body.size) {
+    return { status: false, message: 'Size is required.' };
+  }
+  if (!VALID_SIZES.includes(body.size.toUpperCase())) {
+    return { status: false, message: 'Invalid Size. Must be one of XS, S, M, L, XL, XXL.' };
+  }
+  if (!body.color || typeof body.color !== 'string' || body.color.trim() === '') {
+    return { status: false, message: 'Color is required.' };
+  }
+  if (body.mrp === undefined || body.mrp === null || typeof body.mrp !== 'number' || body.mrp <= 0) {
+    return { status: false, message: 'MRP must be greater than 0.' };
+  }
+  if (body.gst !== undefined && body.gst !== null) {
+    if (typeof body.gst !== 'number' || body.gst < 0) {
+      return { status: false, message: 'GST must be greater than or equal to 0.' };
+    }
+  }
+  if (body.discount !== undefined && body.discount !== null) {
+    if (typeof body.discount !== 'number' || body.discount < 0 || body.discount > 100) {
+      return { status: false, message: 'Discount must be between 0 and 100.' };
+    }
+  }
+  return { status: true };
 };
 
-// ===============================
-// Validation Function
-// ===============================
-
-export const validateProduct = (body) => {
-
-    // ------------------------------
-    // Format Data
-    // ------------------------------
-
-    body.productName = titleCase(body.productName);
-    body.category = titleCase(body.category);
-    body.brand = titleCase(body.brand);
-
-    body.description = body.description?.trim() || "";
-    body.hsnCode = body.hsnCode?.trim() || "";
-
-    // ------------------------------
-    // Product Name
-    // ------------------------------
-
-    if (!body.productName)
-        return { status: false, message: "Product Name is required." };
-
-    if (body.productName.length < 3)
-        return { status: false, message: "Product Name should contain minimum 3 characters." };
-
-    if (body.productName.length > 100)
-        return { status: false, message: "Product Name should not exceed 100 characters." };
-
-    // ------------------------------
-    // Category
-    // ------------------------------
-
-    if (!body.category)
-        return { status: false, message: "Category is required." };
-
-    // ------------------------------
-    // Brand
-    // ------------------------------
-
-    if (!body.brand)
-        return { status: false, message: "Brand is required." };
-
-    // ------------------------------
-    // GST
-    // ------------------------------
-
-    if (!VALID_GST.includes(body.gstPercentage))
-        return {
-            status: false,
-            message: "Invalid GST Percentage."
-        };
-
-    // ------------------------------
-    // HSN
-    // ------------------------------
-
-    if (body.hsnCode !== "") {
-
-        if (!/^[0-9]{4,8}$/.test(body.hsnCode)) {
-
-            return {
-                status: false,
-                message: "Invalid HSN Code."
-            };
-
-        }
-
+/**
+ * Validate product update input
+ */
+export const validateProductUpdate = (body) => {
+  if (body.productName !== undefined && (typeof body.productName !== 'string' || body.productName.trim() === '')) {
+    return { status: false, message: 'Product Name cannot be empty.' };
+  }
+  if (body.size !== undefined) {
+    if (!VALID_SIZES.includes(body.size.toUpperCase())) {
+      return { status: false, message: 'Invalid Size. Must be one of XS, S, M, L, XL, XXL.' };
     }
-
-    // ------------------------------
-    // Variants
-    // ------------------------------
-
-    if (!Array.isArray(body.variants))
-        return {
-            status: false,
-            message: "Variants should be an array."
-        };
-
-    if (body.variants.length === 0)
-        return {
-            status: false,
-            message: "At least one variant is required."
-        };
-
-    const barcodeSet = new Set();
-
-    const variantSet = new Set();
-
-    // ------------------------------
-    // Variant Validation
-    // ------------------------------
-
-    for (const variant of body.variants) {
-
-        variant.barcode = variant.barcode?.trim().toUpperCase();
-
-        variant.size = variant.size?.trim().toUpperCase();
-
-        variant.color = titleCase(variant.color);
-
-        // Barcode
-
-        if (!variant.barcode)
-            return {
-                status: false,
-                message: "Barcode is required."
-            };
-
-        if (!/^[A-Z0-9_-]+$/.test(variant.barcode))
-            return {
-                status: false,
-                message: `Invalid Barcode : ${variant.barcode}`
-            };
-
-        if (barcodeSet.has(variant.barcode))
-            return {
-                status: false,
-                message: `Duplicate Barcode : ${variant.barcode}`
-            };
-
-        barcodeSet.add(variant.barcode);
-
-        // Size
-
-        if (!VALID_SIZES.includes(variant.size))
-            return {
-                status: false,
-                message: `Invalid Size : ${variant.size}`
-            };
-
-        // Color
-
-        if (!variant.color)
-            return {
-                status: false,
-                message: "Color is required."
-            };
-
-        if (!/^[A-Za-z ]+$/.test(variant.color))
-            return {
-                status: false,
-                message: `Invalid Color : ${variant.color}`
-            };
-
-        // Duplicate Variant
-
-        const variantKey = `${variant.size}-${variant.color}`;
-
-        if (variantSet.has(variantKey))
-            return {
-                status: false,
-                message: `Duplicate Variant : ${variantKey}`
-            };
-
-        variantSet.add(variantKey);
-
-        // Purchase Price
-
-        if (variant.purchasePrice <= 0)
-            return {
-                status: false,
-                message: "Purchase Price should be greater than zero."
-            };
-
-        // Selling Price
-
-        if (variant.sellingPrice <= 0)
-            return {
-                status: false,
-                message: "Selling Price should be greater than zero."
-            };
-
-        if (variant.sellingPrice < variant.purchasePrice)
-            return {
-                status: false,
-                message: `Selling Price should not be less than Purchase Price (${variant.barcode})`
-            };
-
-        // Stock
-
-        if (variant.stock < 0)
-            return {
-                status: false,
-                message: "Stock cannot be negative."
-            };
-
-    }
-
-    return {
-        status: true
-    };
-
+  }
+  if (body.color !== undefined && (typeof body.color !== 'string' || body.color.trim() === '')) {
+    return { status: false, message: 'Color cannot be empty.' };
+  }
+  if (body.mrp !== undefined && (typeof body.mrp !== 'number' || body.mrp <= 0)) {
+    return { status: false, message: 'MRP must be greater than 0.' };
+  }
+  if (body.gst !== undefined && (typeof body.gst !== 'number' || body.gst < 0)) {
+    return { status: false, message: 'GST must be greater than or equal to 0.' };
+  }
+  if (body.discount !== undefined && (typeof body.discount !== 'number' || body.discount < 0 || body.discount > 100)) {
+    return { status: false, message: 'Discount must be between 0 and 100.' };
+  }
+  return { status: true };
 };
