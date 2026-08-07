@@ -5,6 +5,7 @@
 
 import mongoose from 'mongoose';
 import Product from '../Models/Product.js';
+import { syncAllFactoryStocks } from '../Helpers/FactoryStockManager.js';
 
 /**
  * Connect to MongoDB database
@@ -26,6 +27,13 @@ const connectDB = async () => {
     await Product.syncIndexes().catch(err => {
       console.warn('Warning syncing Product indexes:', err.message);
     });
+
+    // Backfill the authoritative factory stock balance from the movement ledger
+    const backfilled = await syncAllFactoryStocks().catch(err => {
+      console.warn('Warning backfilling factory stock balances:', err.message);
+      return 0;
+    });
+    console.log(`Factory stock balances synchronized for ${backfilled} product(s)`);
   } catch (error) {
     console.error('Could not connect to MongoDB... ' + error.message);
     process.exit(1);

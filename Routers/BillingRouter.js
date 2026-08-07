@@ -7,6 +7,9 @@ import express from 'express';
 import {
   scanBarcode,
   searchProducts,
+  createBill,
+  getOpenBills,
+  deleteBill,
   addItem,
   removeItem,
   updateQuantity,
@@ -28,6 +31,15 @@ router.post('/scan', scanBarcode);
 
 // 2. Search Product
 router.get('/search', searchProducts);
+
+// 2b. Start a new bill for a waiting customer
+router.post('/bills', createBill);
+
+// 2c. Get the cashier's open (unpaid) bills — the waiting queue
+router.get('/bills', getOpenBills);
+
+// 2d. Discard an open bill
+router.delete('/bills/:billId', deleteBill);
 
 // 3. Add Item
 router.post('/items', addItem);

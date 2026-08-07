@@ -7,6 +7,7 @@ import mongoose from 'mongoose';
 import Sale from '../Models/Sale.js';
 import Bill from '../Models/Bill.js';
 import BillItem from '../Models/BillItem.js';
+import Invoice from '../Models/Invoice.js';
 import Product from '../Models/Product.js';
 import FactoryInventory from '../Models/FactoryInventory.js';
 import RetailInventory from '../Models/RetailInventory.js';

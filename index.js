@@ -9,6 +9,7 @@ import brandRouter from "./Routers/BrandRouter.js";
 import barcodeRouter from "./Routers/BarcodeRouter.js";
 import factoryInventoryRouter from "./Routers/FactoryInventoryRouter.js";
 import retailInventoryRouter from "./Routers/RetailInventoryRouter.js";
+import onlineInventoryRouter from "./Routers/OnlineInventoryRouter.js";
 import stockTransferRouter from "./Routers/StockTransferRouter.js";
 import billingRouter from "./Routers/BillingRouter.js";
 import invoiceRouter from "./Routers/InvoiceRouter.js";
@@ -20,6 +21,16 @@ import settingsRouter from "./Routers/SettingsRouter.js";
 import { requestLogger, errorHandler, notFoundHandler } from "./Middlewares/index.js";
 
 dotenv.config();
+
+// Fail fast if JWT_SECRET is missing — never boot with an insecure default.
+// Imported after dotenv.config() so process.env is already populated.
+import { getJwtSecret } from './Helpers/AppEnv.js';
+try {
+  getJwtSecret();
+} catch (error) {
+  console.error('[BOOT HALT] ' + error.message);
+  process.exit(1);
+}
 
 const app = express();
 
@@ -47,6 +58,7 @@ app.use("/api/brands", brandRouter);
 app.use("/api/barcodes", barcodeRouter);
 app.use("/api/factory-inventory", factoryInventoryRouter);
 app.use("/api/retail-inventory", retailInventoryRouter);
+app.use("/api/online-inventory", onlineInventoryRouter);
 app.use("/api/stock-transfer", stockTransferRouter);
 app.use("/api/billing", billingRouter);
 app.use("/api/invoices", invoiceRouter);

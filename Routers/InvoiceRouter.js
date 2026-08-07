@@ -9,7 +9,7 @@ import {
   getInvoice,
   getAllInvoices,
   cancelInvoice,
-  downloadInvoicePdf
+  getInvoicePrintData
 } from '../Controllers/InvoiceController.js';
 import { authenticate, authorize } from '../Middlewares/index.js';
 
@@ -30,8 +30,8 @@ router.post('/', createInvoice);
 // 3. Get Specific Invoice Details
 router.get('/:invoiceId', getInvoice);
 
-// 4. Download / Stream Invoice PDF File
-router.get('/:invoiceId/pdf', downloadInvoicePdf);
+// 4. Get Invoice Print Data (JSON for frontend PDF rendering — backend does not generate PDFs)
+router.get('/:invoiceId/print', getInvoicePrintData);
 
 // 5. Cancel Invoice and Restore Stock Levels
 router.put('/:invoiceId/cancel', cancelInvoice);

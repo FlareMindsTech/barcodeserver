@@ -28,10 +28,10 @@ router.get('/profile', getProfile);
 router.put('/change-password', authorize(['ADMIN']), changePassword);
 
 // 3. User CRUD routes (Admin only)
-router.post('/', createUser);
-router.get('/', authorize(['ADMIN']), getAllUsers);
+router.post('/', authorize(['ADMIN']), createUser);
+router.get('/', getAllUsers);
 router.get('/:id', authorize(['ADMIN']), getUserById);
-router.put('/:id', updateUser);
+router.put('/:id', authorize(['ADMIN']), updateUser);
 router.delete('/:id', authorize(['ADMIN']), deleteUser);
 
 export default router;

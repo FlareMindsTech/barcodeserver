@@ -6,25 +6,21 @@
 import mongoose from 'mongoose';
 import Product from '../Models/Product.js';
 import FactoryInventory from '../Models/FactoryInventory.js';
+import {
+  getFactoryStock,
+  addFactoryStock,
+  deductFactoryStock,
+  setFactoryStock
+} from '../Helpers/FactoryStockManager.js';
 
 /**
- * Helper to calculate current stock for a specific product ID
+ * Helper to read current stock for a specific product ID (atomic balance)
  * @param {mongoose.Types.ObjectId} productId 
  * @returns {Promise<number>} current stock quantity
  */
 export const getProductCurrentStock = async (productId) => {
-  const movements = await FactoryInventory.find({ productId });
-  let stock = 0;
-  for (const m of movements) {
-    if (m.movementType === 'inward') {
-      stock += m.quantity;
-    } else if (m.movementType === 'outward') {
-      stock -= m.quantity;
-    } else if (m.movementType === 'adjustment') {
-      stock += m.quantity; // Adjustment quantity is stored as delta (can be positive or negative)
-    }
-  }
-  return stock;
+  const balance = await getFactoryStock(productId);
+  return balance === null ? 0 : balance;
 };
 
 /**
@@ -64,7 +60,18 @@ export const addProducedStock = async (req, res, next) => {
       });
     }
 
-    // Record inward production movement
+    // Atomically increase the authoritative balance BEFORE recording the ledger
+    // movement, so the balance is never behind the ledger on a crash.
+    const updated = await addFactoryStock(product._id, quantity);
+    if (!updated) {
+      return res.status(404).json({
+        Success: false,
+        Message: 'Product not found.',
+        StatusCode: 404
+      });
+    }
+
+    // Record inward production movement (audit trail)
     const movement = new FactoryInventory({
       productId: product._id,
       quantity,
@@ -75,7 +82,7 @@ export const addProducedStock = async (req, res, next) => {
     await movement.save();
 
     // Dynamically update product stockStatus based on new stock level
-    const currentStock = await getProductCurrentStock(product._id);
+    const currentStock = updated.factoryStock;
     if (product.stockStatus === 'OUT_OF_STOCK' && currentStock > 0) {
       product.stockStatus = 'IN_STOCK';
       await product.save();
@@ -133,7 +140,10 @@ export const updateFactoryStock = async (req, res, next) => {
       });
     }
 
-    // Record adjustment movement
+    // Operator-driven manual correction: set the balance to the absolute target
+    // atomically, then record the adjustment delta as an audit movement.
+    await setFactoryStock(product._id, quantity);
+
     const movement = new FactoryInventory({
       productId: product._id,
       quantity: delta,
@@ -144,8 +154,7 @@ export const updateFactoryStock = async (req, res, next) => {
     await movement.save();
 
     // Dynamically update product stockStatus
-    const newStock = currentStock + delta;
-    product.stockStatus = newStock > 0 ? 'IN_STOCK' : 'OUT_OF_STOCK';
+    product.stockStatus = quantity > 0 ? 'IN_STOCK' : 'OUT_OF_STOCK';
     await product.save();
 
     return res.status(200).json({
@@ -199,6 +208,17 @@ export const removeFactoryStock = async (req, res, next) => {
       });
     }
 
+    // Guarded atomic debit: returns null if a concurrent flow consumed the stock
+    // between the read above and this write — abort without corrupting the ledger.
+    const updated = await deductFactoryStock(product._id, removeQty);
+    if (!updated) {
+      return res.status(400).json({
+        Success: false,
+        Message: 'Insufficient Factory Stock (stock changed concurrently). Please retry.',
+        StatusCode: 400
+      });
+    }
+
     // Record outward movement
     const movement = new FactoryInventory({
       productId: product._id,
@@ -210,7 +230,7 @@ export const removeFactoryStock = async (req, res, next) => {
     await movement.save();
 
     // Update stockStatus if out of stock
-    const newStock = currentStock - removeQty;
+    const newStock = updated.factoryStock;
     if (newStock <= 0) {
       product.stockStatus = 'OUT_OF_STOCK';
       await product.save();
@@ -275,6 +295,9 @@ export const adjustFactoryStock = async (req, res, next) => {
       });
     }
 
+    // Set the balance to the physically counted quantity, then log the delta.
+    await setFactoryStock(product._id, actualQuantity);
+
     // Record adjustment movement
     const movement = new FactoryInventory({
       productId: product._id,
@@ -311,8 +334,7 @@ export const getFactoryInventory = async (req, res, next) => {
 
     const result = [];
     for (const product of products) {
-      const quantity = await getProductCurrentStock(product._id);
-      result.push({
+      const quantity = await getProductCurrentStock(product._id);      result.push({
         product: {
           id: product.productId,
           _id: product._id,

@@ -104,6 +104,14 @@ const ProductSchema = new Schema(
       default: false,
       index: true
     },
+    // Running factory balance (authoritative for current stock). Kept in sync
+    // with the FactoryInventory movement ledger via atomic $inc/$set ops so
+    // concurrent dispatch/adjust cannot silently overdraw stock.
+    factoryStock: {
+      type: Number,
+      min: 0,
+      default: 0
+    },
     // Optional compatibility fields
     costPrice: {
       type: Number,
