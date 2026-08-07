@@ -4,14 +4,14 @@
  */
 
 import express from 'express';
-import { 
-  createUser, 
-  getAllUsers, 
-  getUserById, 
-  updateUser, 
-  deleteUser, 
-  changePassword, 
-  getProfile 
+import {
+  createUser,
+  getAllUsers,
+  getUserById,
+  updateUser,
+  deleteUser,
+  changePassword,
+  getProfile
 } from '../Controllers/UserController.js';
 import { authenticate, authorize } from '../Middlewares/index.js';
 
@@ -28,8 +28,8 @@ router.get('/profile', getProfile);
 router.put('/change-password', authorize(['ADMIN']), changePassword);
 
 // 3. User CRUD routes (Admin only)
-router.post('/',authorize(['ADMIN']), createUser);
-router.get('/',authorize(['ADMIN']), getAllUsers);
+router.post('/', createUser);
+router.get('/', authorize(['ADMIN']), getAllUsers);
 router.get('/:id', authorize(['ADMIN']), getUserById);
 router.put('/:id', updateUser);
 router.delete('/:id', authorize(['ADMIN']), deleteUser);

@@ -71,7 +71,7 @@ const RetailInventorySchema = new Schema(
 RetailInventorySchema.index({ stockStatus: 1 });
 
 // Pre-save hook: Compute stock status and update lastUpdated timestamp
-RetailInventorySchema.pre('save', function (next) {
+RetailInventorySchema.pre('save', function () {
   this.lastUpdated = new Date();
   
   if (this.quantity <= 0) {
@@ -81,8 +81,6 @@ RetailInventorySchema.pre('save', function (next) {
   } else {
     this.stockStatus = 'in_stock';
   }
-  
-  next();
 });
 
 // Static method to update product stock quantity

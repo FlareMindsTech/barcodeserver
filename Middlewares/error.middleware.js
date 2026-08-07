@@ -10,7 +10,10 @@ export const errorHandler = (err, req, res, next) => {
     message = Object.values(err.errors).map(val => val.message).join(', ');
   } else if (err.code === 11000) {
     statusCode = 400;
-    message = 'Duplicate key error: A record with this value already exists.';
+    const field = err.keyPattern ? Object.keys(err.keyPattern).join(', ') : (err.keyValue ? Object.keys(err.keyValue).join(', ') : '');
+    message = field
+      ? `Duplicate key error: A record with ${field} already exists.`
+      : 'Duplicate key error: A record with this value already exists.';
   } else if (err.name === 'JsonWebTokenError') {
     statusCode = 401;
     message = 'Invalid token.';

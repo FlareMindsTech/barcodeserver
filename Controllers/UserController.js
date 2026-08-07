@@ -4,10 +4,10 @@
  */
 
 import User from '../Models/User.js';
-import { 
-  validateUserCreation, 
-  validateUserUpdate, 
-  validatePasswordChange 
+import {
+  validateUserCreation,
+  validateUserUpdate,
+  validatePasswordChange
 } from '../Helpers/UserValidation.js';
 
 /**
@@ -207,7 +207,7 @@ export const updateUser = async (req, res, next) => {
     if (inputUsername !== undefined) {
       const cleanUsername = inputUsername.trim();
       if (cleanUsername !== user.username) {
-        const existingUsername = await User.findOne({ 
+        const existingUsername = await User.findOne({
           username: new RegExp('^' + cleanUsername + '$', 'i'),
           _id: { $ne: id }
         });

@@ -4,6 +4,7 @@
  */
 
 import mongoose from 'mongoose';
+import Product from '../Models/Product.js';
 
 /**
  * Connect to MongoDB database
@@ -17,10 +18,14 @@ const connectDB = async () => {
     
     // Mask password in logs to protect credentials
     const maskedUri = uri.replace(/:([^@:]+)@/, ':******@');
-    console.log(`Connecting to MongoDB at: ${maskedUri}...`);
-
+    
     const conn = await mongoose.connect(uri);
-    console.log(`Connected to MongoDB: ${conn.connection.host}/${conn.connection.name}`);
+    console.log(`Connected to MongoDB Successfully`);
+
+    // Synchronize indexes to drop stale/obsolete database indexes (e.g. variants.barcode_1)
+    await Product.syncIndexes().catch(err => {
+      console.warn('Warning syncing Product indexes:', err.message);
+    });
   } catch (error) {
     console.error('Could not connect to MongoDB... ' + error.message);
     process.exit(1);
@@ -28,3 +33,4 @@ const connectDB = async () => {
 };
 
 export default connectDB;
+

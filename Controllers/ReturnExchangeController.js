@@ -1,6 +1,18 @@
 /**
  * @file ReturnExchangeController.js
  * @description Controller for Return, Exchange, and Refund Management operations.
+ *
+ * SCHEMA CHANGE REQUIRED (not included in this file, apply separately):
+ *   Refund.js -> add a `direction` field:
+ *     direction: {
+ *       type: String,
+ *       enum: ['to_customer', 'from_customer'],
+ *       default: 'to_customer'
+ *     }
+ *   This lets one model represent both "we refunded the customer" (plain returns,
+ *   and exchanges where the new item is cheaper) and "customer paid us extra"
+ *   (exchanges where the new item is more expensive) without a payment gateway --
+ *   it's just a ledger entry for money that already changed hands at the counter.
  */
 
 import mongoose from 'mongoose';
@@ -13,26 +25,31 @@ import Product from '../Models/Product.js';
 import RetailInventory from '../Models/RetailInventory.js';
 import RetailStockMovement from '../Models/RetailStockMovement.js';
 
+const ALLOWED_SETTLEMENT_METHODS = ['cash', 'card', 'upi', 'store_credit'];
+
 /**
  * Helper to resolve product reference by ID, Code, or Barcode
  */
-const findProduct = async (productRef) => {
+const findProduct = async (productRef, session) => {
   const query = mongoose.Types.ObjectId.isValid(productRef)
     ? { $or: [{ _id: productRef }, { productId: productRef }, { barcode: productRef }] }
     : { $or: [{ productId: productRef }, { barcode: productRef }] };
-  return await Product.findOne(query);
+  return await Product.findOne(query).session(session || null);
 };
+
+const isPositiveInteger = (val) => Number.isInteger(val) && val > 0;
 
 /**
  * 1. Return Product
  * Endpoint: POST /api/returns
  */
 export const returnProduct = async (req, res, next) => {
+  const session = await mongoose.startSession();
   try {
     const { invoiceNumber, productId, quantity, reason } = req.body;
     const userId = req.user.userId;
 
-    if (!invoiceNumber || !productId || !quantity) {
+    if (!invoiceNumber || !productId || quantity === undefined) {
       return res.status(400).json({
         Success: false,
         Message: 'invoiceNumber, productId, and quantity are required.',
@@ -41,119 +58,129 @@ export const returnProduct = async (req, res, next) => {
       });
     }
 
-    // 1. Verify Invoice
-    const invoice = await Invoice.findOne({ invoiceNumber }).populate('billId');
-    if (!invoice) {
-      return res.status(404).json({
-        Success: false,
-        Message: `Invoice ${invoiceNumber} not found.`,
-        Result: null,
-        StatusCode: 404
-      });
-    }
-
-    if (invoice.invoiceStatus === 'cancelled') {
+    if (!isPositiveInteger(quantity)) {
       return res.status(400).json({
         Success: false,
-        Message: 'Cannot return products from a cancelled invoice.',
+        Message: 'quantity must be a positive integer.',
         Result: null,
         StatusCode: 400
       });
     }
 
-    // 2. Verify Product
-    const product = await findProduct(productId);
-    if (!product) {
-      return res.status(404).json({
-        Success: false,
-        Message: `Product ${productId} not found.`,
-        Result: null,
-        StatusCode: 404
+    let resultPayload;
+
+    await session.withTransaction(async () => {
+      // 1. Verify Invoice
+      const invoice = await Invoice.findOne({ invoiceNumber }).populate('billId').session(session);
+      if (!invoice) {
+        throw { statusCode: 404, message: `Invoice ${invoiceNumber} not found.` };
+      }
+
+      if (invoice.invoiceStatus === 'cancelled') {
+        throw { statusCode: 400, message: 'Cannot return products from a cancelled invoice.' };
+      }
+
+      // 2. Verify Product
+      const product = await findProduct(productId, session);
+      if (!product) {
+        throw { statusCode: 404, message: `Product ${productId} not found.` };
+      }
+
+      // 3. Find Product in Invoice (via BillItem)
+      const billItem = await BillItem.findOne({
+        billId: invoice.billId._id,
+        productId: product._id
+      }).session(session);
+      if (!billItem) {
+        throw { statusCode: 400, message: 'This product was not purchased in the specified invoice.' };
+      }
+
+      // 4. Validate quantity limits (safe inside transaction: no concurrent writer can
+      // insert a competing Return between this read and our write below)
+      const existingReturns = await Return.find({
+        invoiceId: invoice._id,
+        productId: product._id,
+        status: { $in: ['approved', 'refunded', 'exchanged'] }
+      }).session(session);
+      const totalAlreadyReturned = existingReturns.reduce((sum, r) => sum + r.quantity, 0);
+
+      if (totalAlreadyReturned + quantity > billItem.quantity) {
+        throw {
+          statusCode: 400,
+          message: `Maximum return quantity exceeded. Already returned: ${totalAlreadyReturned}, Purchased: ${billItem.quantity}, Requested: ${quantity}.`
+        };
+      }
+
+      // 5. Calculate Refund Amount (GST and discounts considered per unit)
+      const unitPrice = billItem.total / billItem.quantity;
+      const refundAmount = unitPrice * quantity;
+
+      // 6. Save Return record
+      const newReturn = new Return({
+        invoiceId: invoice._id,
+        productId: product._id,
+        quantity,
+        refundAmount: parseFloat(refundAmount.toFixed(2)),
+        returnReason: reason || 'Size / Quality Issue',
+        status: 'approved', // Auto-approved on request creation
+        approvedBy: userId
       });
-    }
+      await newReturn.save({ session });
 
-    // 3. Find Product in Invoice (via BillItem)
-    const billItem = await BillItem.findOne({
-      billId: invoice.billId._id,
-      productId: product._id
-    });
-    if (!billItem) {
-      return res.status(400).json({
-        Success: false,
-        Message: 'This product was not purchased in the specified invoice.',
-        Result: null,
-        StatusCode: 400
+      // 7. Restore Retail Stock and log movement
+      await RetailInventory.adjustStock(product._id, quantity, { session });
+      const movement = new RetailStockMovement({
+        productId: product._id,
+        movementType: 'return',
+        quantity,
+        remarks: `Restored stock from returned invoice ${invoiceNumber}`
       });
-    }
+      await movement.save({ session });
 
-    // 4. Validate quantity limits
-    const existingReturns = await Return.find({
-      invoiceId: invoice._id,
-      productId: product._id,
-      status: { $in: ['approved', 'refunded', 'exchanged'] }
+      resultPayload = {
+        returnId: newReturn._id.toString(),
+        refundAmount: newReturn.refundAmount,
+        status: 'Approved'
+      };
     });
-    const totalAlreadyReturned = existingReturns.reduce((sum, r) => sum + r.quantity, 0);
-
-    if (totalAlreadyReturned + quantity > billItem.quantity) {
-      return res.status(400).json({
-        Success: false,
-        Message: `Maximum return quantity exceeded. Already returned: ${totalAlreadyReturned}, Purchased: ${billItem.quantity}, Requested: ${quantity}.`,
-        Result: null,
-        StatusCode: 400
-      });
-    }
-
-    // 5. Calculate Refund Amount (GST and discounts considered per unit)
-    const unitPrice = billItem.total / billItem.quantity;
-    const refundAmount = unitPrice * quantity;
-
-    // 6. Save Return record
-    const newReturn = new Return({
-      invoiceId: invoice._id,
-      productId: product._id,
-      quantity,
-      refundAmount: parseFloat(refundAmount.toFixed(2)),
-      returnReason: reason || 'Size / Quality Issue',
-      status: 'approved', // Auto-approved on request creation
-      approvedBy: userId
-    });
-    await newReturn.save();
-
-    // 7. Restore Retail Stock and log movement
-    await RetailInventory.adjustStock(product._id, quantity);
-    const movement = new RetailStockMovement({
-      productId: product._id,
-      movementType: 'return',
-      quantity,
-      remarks: `Restored stock from returned invoice ${invoiceNumber}`
-    });
-    await movement.save();
 
     return res.status(200).json({
       Success: true,
       Message: 'Product returned successfully.',
-      Result: {
-        returnId: newReturn._id.toString(),
-        refundAmount: newReturn.refundAmount,
-        status: 'Approved'
-      },
+      Result: resultPayload,
       StatusCode: 200
     });
   } catch (error) {
+    if (error && error.statusCode) {
+      return res.status(error.statusCode).json({
+        Success: false,
+        Message: error.message,
+        Result: null,
+        StatusCode: error.statusCode
+      });
+    }
     next(error);
+  } finally {
+    session.endSession();
   }
 };
 
 /**
  * 2. Exchange Product
  * Endpoint: POST /api/exchanges
+ *
+ * Body may optionally include `settlementMethod` (cash/card/upi/store_credit).
+ * Required whenever the exchange isn't an even swap, since real money changes
+ * hands at the counter and we want a ledger entry for it (till reconciliation,
+ * reporting, audit trail) even though there's no payment gateway involved.
  */
 export const exchangeProduct = async (req, res, next) => {
+  const session = await mongoose.startSession();
   try {
-    const { invoiceNumber, oldProductId, newProductId, quantity } = req.body;
+    const { invoiceNumber, oldProductId, newProductId, quantity, settlementMethod } = req.body;
     const userId = req.user.userId;
 
-    if (!invoiceNumber || !oldProductId || !newProductId || !quantity) {
+    if (!invoiceNumber || !oldProductId || !newProductId || quantity === undefined) {
       return res.status(400).json({
         Success: false,
         Message: 'invoiceNumber, oldProductId, newProductId, and quantity are required.',
@@ -162,148 +189,199 @@ export const exchangeProduct = async (req, res, next) => {
       });
     }
 
-    // 1. Verify Invoice
-    const invoice = await Invoice.findOne({ invoiceNumber }).populate('billId');
-    if (!invoice) {
-      return res.status(404).json({
-        Success: false,
-        Message: `Invoice ${invoiceNumber} not found.`,
-        Result: null,
-        StatusCode: 404
-      });
-    }
-
-    // 2. Verify Old Product
-    const oldProduct = await findProduct(oldProductId);
-    if (!oldProduct) {
-      return res.status(404).json({
-        Success: false,
-        Message: `Old Product ${oldProductId} not found.`,
-        Result: null,
-        StatusCode: 404
-      });
-    }
-
-    // 3. Verify New Product
-    const newProduct = await findProduct(newProductId);
-    if (!newProduct) {
-      return res.status(404).json({
-        Success: false,
-        Message: `New Product ${newProductId} not found.`,
-        Result: null,
-        StatusCode: 404
-      });
-    }
-
-    // 4. Verify Original Purchase
-    const oldBillItem = await BillItem.findOne({
-      billId: invoice.billId._id,
-      productId: oldProduct._id
-    });
-    if (!oldBillItem) {
+    if (!isPositiveInteger(quantity)) {
       return res.status(400).json({
         Success: false,
-        Message: 'The old product was not purchased in the specified invoice.',
+        Message: 'quantity must be a positive integer.',
         Result: null,
         StatusCode: 400
       });
     }
 
-    // Validate return quantity of old product
-    const existingReturns = await Return.find({
-      invoiceId: invoice._id,
-      productId: oldProduct._id,
-      status: { $in: ['approved', 'refunded', 'exchanged'] }
-    });
-    const totalAlreadyReturned = existingReturns.reduce((sum, r) => sum + r.quantity, 0);
-
-    if (totalAlreadyReturned + quantity > oldBillItem.quantity) {
+    if (oldProductId === newProductId) {
       return res.status(400).json({
         Success: false,
-        Message: `Maximum exchange/return quantity exceeded. Already returned/exchanged: ${totalAlreadyReturned}, Purchased: ${oldBillItem.quantity}, Requested: ${quantity}.`,
+        Message: 'oldProductId and newProductId must be different products.',
         Result: null,
         StatusCode: 400
       });
     }
 
-    // 5. Check New Product Stock
-    const newInventory = await RetailInventory.findOne({ productId: newProduct._id });
-    if (!newInventory || newInventory.quantity < quantity) {
-      return res.status(400).json({
-        Success: false,
-        Message: `Insufficient stock for the exchange product: ${newProduct.productName}. Available: ${newInventory ? newInventory.quantity : 0}.`,
-        Result: null,
-        StatusCode: 400
+    if (settlementMethod !== undefined) {
+      if (typeof settlementMethod !== 'string' || !ALLOWED_SETTLEMENT_METHODS.includes(settlementMethod.toLowerCase())) {
+        return res.status(400).json({
+          Success: false,
+          Message: `Invalid settlementMethod. Allowed values: ${ALLOWED_SETTLEMENT_METHODS.join(', ')}`,
+          Result: null,
+          StatusCode: 400
+        });
+      }
+    }
+
+    let resultPayload;
+
+    await session.withTransaction(async () => {
+      // 1. Verify Invoice
+      const invoice = await Invoice.findOne({ invoiceNumber }).populate('billId').session(session);
+      if (!invoice) {
+        throw { statusCode: 404, message: `Invoice ${invoiceNumber} not found.` };
+      }
+
+      if (invoice.invoiceStatus === 'cancelled') {
+        throw { statusCode: 400, message: 'Cannot exchange products from a cancelled invoice.' };
+      }
+
+      // 2. Verify Old Product
+      const oldProduct = await findProduct(oldProductId, session);
+      if (!oldProduct) {
+        throw { statusCode: 404, message: `Old Product ${oldProductId} not found.` };
+      }
+
+      // 3. Verify New Product
+      const newProduct = await findProduct(newProductId, session);
+      if (!newProduct) {
+        throw { statusCode: 404, message: `New Product ${newProductId} not found.` };
+      }
+
+      // 4. Verify Original Purchase
+      const oldBillItem = await BillItem.findOne({
+        billId: invoice.billId._id,
+        productId: oldProduct._id
+      }).session(session);
+      if (!oldBillItem) {
+        throw { statusCode: 400, message: 'The old product was not purchased in the specified invoice.' };
+      }
+
+      // Validate return quantity of old product
+      const existingReturns = await Return.find({
+        invoiceId: invoice._id,
+        productId: oldProduct._id,
+        status: { $in: ['approved', 'refunded', 'exchanged'] }
+      }).session(session);
+      const totalAlreadyReturned = existingReturns.reduce((sum, r) => sum + r.quantity, 0);
+
+      if (totalAlreadyReturned + quantity > oldBillItem.quantity) {
+        throw {
+          statusCode: 400,
+          message: `Maximum exchange/return quantity exceeded. Already returned/exchanged: ${totalAlreadyReturned}, Purchased: ${oldBillItem.quantity}, Requested: ${quantity}.`
+        };
+      }
+
+      // 5. Calculate Price Difference
+      const oldUnitRefund = oldBillItem.total / oldBillItem.quantity;
+      const totalOldVal = oldUnitRefund * quantity;
+
+      const newUnitGst = newProduct.mrp * (newProduct.gst / 100);
+      const newUnitDisc = newProduct.mrp * (newProduct.discount / 100);
+      const newUnitTotal = newProduct.mrp + newUnitGst - newUnitDisc;
+      const totalNewVal = newUnitTotal * quantity;
+
+      const priceDifference = totalNewVal - totalOldVal;
+      const formattedDiff = parseFloat(priceDifference.toFixed(2));
+
+      if (formattedDiff !== 0 && !settlementMethod) {
+        throw {
+          statusCode: 400,
+          message: `This exchange has a price difference of ${Math.abs(formattedDiff)}. settlementMethod is required to record how it was settled at the counter.`
+        };
+      }
+
+      // 6. Atomically deduct new-product stock, guarded so it can never go negative
+      // even under concurrent requests (this replaces the earlier read-then-write check).
+      const deducted = await RetailInventory.findOneAndUpdate(
+        { productId: newProduct._id, quantity: { $gte: quantity } },
+        { $inc: { quantity: -quantity } },
+        { session, new: true }
+      );
+      if (!deducted) {
+        const currentInventory = await RetailInventory.findOne({ productId: newProduct._id }).session(session);
+        throw {
+          statusCode: 400,
+          message: `Insufficient stock for the exchange product: ${newProduct.productName}. Available: ${currentInventory ? currentInventory.quantity : 0}.`
+        };
+      }
+      const deductMovement = new RetailStockMovement({
+        productId: newProduct._id,
+        movementType: 'sale',
+        quantity,
+        remarks: `Deducted stock for exchange delivery on invoice ${invoiceNumber}`
       });
-    }
+      await deductMovement.save({ session });
 
-    // 6. Calculate Price Difference
-    // Calculate old item's net unit refund value (including original discount/GST)
-    const oldUnitRefund = oldBillItem.total / oldBillItem.quantity;
-    const totalOldVal = oldUnitRefund * quantity;
+      // 7. Restore old product stock
+      await RetailInventory.adjustStock(oldProduct._id, quantity, { session });
+      const restoreMovement = new RetailStockMovement({
+        productId: oldProduct._id,
+        movementType: 'return',
+        quantity,
+        remarks: `Restored stock from exchange return on invoice ${invoiceNumber}`
+      });
+      await restoreMovement.save({ session });
 
-    // Calculate new item's net price (MRP + GST - Discount)
-    const newUnitGst = newProduct.mrp * (newProduct.gst / 100);
-    const newUnitDisc = newProduct.mrp * (newProduct.discount / 100);
-    const newUnitTotal = newProduct.mrp + newUnitGst - newUnitDisc;
-    const totalNewVal = newUnitTotal * quantity;
+      // 8. Save Exchange Return history
+      const exchangeReturn = new Return({
+        invoiceId: invoice._id,
+        productId: oldProduct._id,
+        quantity,
+        refundAmount: 0, // Since it's swapped for a product, not cash-refunded directly
+        returnReason: `Exchanged for ${newProduct.productName}`,
+        status: 'exchanged',
+        approvedBy: userId
+      });
+      await exchangeReturn.save({ session });
 
-    const priceDifference = totalNewVal - totalOldVal;
+      // 9. Log the counter settlement (if any money changed hands) as a Refund
+      // ledger entry, tied back to this Return, so it shows up in reconciliation
+      // and audit trail even though no payment gateway was involved.
+      let settlementRecord = null;
+      if (formattedDiff !== 0) {
+        const refund = new Refund({
+          returnId: exchangeReturn._id,
+          refundMethod: settlementMethod.toLowerCase(),
+          amount: Math.abs(formattedDiff),
+          direction: formattedDiff < 0 ? 'to_customer' : 'from_customer', // requires schema addition, see file header
+          status: 'completed',
+          processedAt: new Date()
+        });
+        await refund.save({ session });
+        settlementRecord = refund;
+      }
 
-    // 7. Update Retail Inventory
-    // Restore Old Product
-    await RetailInventory.adjustStock(oldProduct._id, quantity);
-    const restoreMovement = new RetailStockMovement({
-      productId: oldProduct._id,
-      movementType: 'return',
-      quantity,
-      remarks: `Restored stock from exchange return on invoice ${invoiceNumber}`
+      let action = 'Even Exchange';
+      if (formattedDiff > 0) {
+        action = 'Customer Pays';
+      } else if (formattedDiff < 0) {
+        action = 'Refund Customer';
+      }
+
+      resultPayload = {
+        priceDifference: formattedDiff,
+        action,
+        amount: Math.abs(formattedDiff),
+        settlementMethod: settlementRecord ? settlementRecord.refundMethod : null,
+        settlementId: settlementRecord ? settlementRecord._id.toString() : null,
+        returnId: exchangeReturn._id.toString()
+      };
     });
-    await restoreMovement.save();
-
-    // Deduct New Product
-    await RetailInventory.adjustStock(newProduct._id, -quantity);
-    const deductMovement = new RetailStockMovement({
-      productId: newProduct._id,
-      movementType: 'sale',
-      quantity,
-      remarks: `Deducted stock for exchange delivery on invoice ${invoiceNumber}`
-    });
-    await deductMovement.save();
-
-    // 8. Save Exchange Return history
-    const exchangeReturn = new Return({
-      invoiceId: invoice._id,
-      productId: oldProduct._id,
-      quantity,
-      refundAmount: 0, // Since it's swapped for a product
-      returnReason: `Exchanged for ${newProduct.productName}`,
-      status: 'exchanged',
-      approvedBy: userId
-    });
-    await exchangeReturn.save();
-
-    const formattedDiff = parseFloat(priceDifference.toFixed(2));
-    let action = 'Even Exchange';
-    if (formattedDiff > 0) {
-      action = 'Customer Pays';
-    } else if (formattedDiff < 0) {
-      action = 'Refund Customer';
-    }
 
     return res.status(200).json({
       Success: true,
       Message: 'Product exchanged successfully.',
-      Result: {
-        priceDifference: formattedDiff,
-        action,
-        amount: Math.abs(formattedDiff),
-        returnId: exchangeReturn._id.toString()
-      },
+      Result: resultPayload,
       StatusCode: 200
     });
   } catch (error) {
+    if (error && error.statusCode) {
+      return res.status(error.statusCode).json({
+        Success: false,
+        Message: error.message,
+        Result: null,
+        StatusCode: error.statusCode
+      });
+    }
     next(error);
+  } finally {
+    session.endSession();
   }
 };
 
@@ -312,6 +390,7 @@ export const exchangeProduct = async (req, res, next) => {
  * Endpoint: POST /api/refunds
  */
 export const processRefund = async (req, res, next) => {
+  const session = await mongoose.startSession();
   try {
     const { returnId, refundMethod } = req.body;
 
@@ -324,72 +403,71 @@ export const processRefund = async (req, res, next) => {
       });
     }
 
-    // 1. Validate Refund Method
-    const allowedMethods = ['cash', 'card', 'upi', 'store_credit'];
-    if (!allowedMethods.includes(refundMethod.toLowerCase())) {
+    if (typeof refundMethod !== 'string' || !ALLOWED_SETTLEMENT_METHODS.includes(refundMethod.toLowerCase())) {
       return res.status(400).json({
         Success: false,
-        Message: `Invalid refund method. Allowed values: ${allowedMethods.join(', ')}`,
+        Message: `Invalid refund method. Allowed values: ${ALLOWED_SETTLEMENT_METHODS.join(', ')}`,
         Result: null,
         StatusCode: 400
       });
     }
 
-    // 2. Verify Return
-    const returnDoc = await Return.findById(returnId);
-    if (!returnDoc) {
-      return res.status(404).json({
-        Success: false,
-        Message: 'Return record not found.',
-        Result: null,
-        StatusCode: 404
-      });
-    }
+    let resultPayload;
 
-    if (returnDoc.status === 'refunded') {
-      return res.status(400).json({
-        Success: false,
-        Message: 'Refund has already been completed for this return.',
-        Result: null,
-        StatusCode: 400
-      });
-    }
+    await session.withTransaction(async () => {
+      const returnDoc = await Return.findById(returnId).session(session);
+      if (!returnDoc) {
+        throw { statusCode: 404, message: 'Return record not found.' };
+      }
 
-    if (returnDoc.status === 'rejected') {
-      return res.status(400).json({
-        Success: false,
-        Message: 'Cannot process refund for a rejected return request.',
-        Result: null,
-        StatusCode: 400
-      });
-    }
+      // Only a Return that's sitting in 'approved' state is eligible to be paid out.
+      // This blocks 'refunded' (already done), 'rejected' (never eligible), and
+      // 'exchanged' (settled separately via exchangeProduct, refundAmount is 0 there).
+      if (returnDoc.status !== 'approved') {
+        throw {
+          statusCode: 400,
+          message: `Cannot process refund for a return with status '${returnDoc.status}'.`
+        };
+      }
 
-    // 3. Create Refund record
-    const refund = new Refund({
-      returnId: returnDoc._id,
-      refundMethod: refundMethod.toLowerCase(),
-      amount: returnDoc.refundAmount,
-      status: 'completed',
-      processedAt: new Date()
+      const refund = new Refund({
+        returnId: returnDoc._id,
+        refundMethod: refundMethod.toLowerCase(),
+        amount: returnDoc.refundAmount,
+        direction: 'to_customer',
+        status: 'completed',
+        processedAt: new Date()
+      });
+      await refund.save({ session });
+
+      returnDoc.status = 'refunded';
+      await returnDoc.save({ session });
+
+      resultPayload = {
+        refundId: refund._id.toString(),
+        amount: refund.amount,
+        status: 'completed'
+      };
     });
-    await refund.save();
-
-    // 4. Update Return status to refunded
-    returnDoc.status = 'refunded';
-    await returnDoc.save();
 
     return res.status(200).json({
       Success: true,
       Message: 'Refund processed successfully.',
-      Result: {
-        refundId: refund._id.toString(),
-        amount: refund.amount,
-        status: 'completed'
-      },
+      Result: resultPayload,
       StatusCode: 200
     });
   } catch (error) {
+    if (error && error.statusCode) {
+      return res.status(error.statusCode).json({
+        Success: false,
+        Message: error.message,
+        Result: null,
+        StatusCode: error.statusCode
+      });
+    }
     next(error);
+  } finally {
+    session.endSession();
   }
 };
 
@@ -405,21 +483,25 @@ export const getReturnHistory = async (req, res, next) => {
 
     const { status, type } = req.query;
 
-    const filter = {};
+    // Build conditions separately and combine, instead of writing to `filter.status`
+    // twice -- previously a `type` filter silently clobbered an explicit `status` filter.
+    const conditions = [];
 
     if (status) {
-      filter.status = status.toLowerCase();
+      conditions.push({ status: status.toLowerCase() });
     }
 
-    // Filter by type: 'return' (non-zero refundAmount) vs 'exchange' (status == exchanged or refundAmount == 0)
     if (type) {
-      if (type.toLowerCase() === 'return') {
-        filter.status = { $ne: 'exchanged' };
-        filter.refundAmount = { $gt: 0 };
-      } else if (type.toLowerCase() === 'exchange') {
-        filter.status = 'exchanged';
+      const normalizedType = type.toLowerCase();
+      if (normalizedType === 'return') {
+        conditions.push({ status: { $ne: 'exchanged' } });
+        conditions.push({ refundAmount: { $gt: 0 } });
+      } else if (normalizedType === 'exchange') {
+        conditions.push({ status: 'exchanged' });
       }
     }
+
+    const filter = conditions.length > 0 ? { $and: conditions } : {};
 
     const total = await Return.countDocuments(filter);
     const returns = await Return.find(filter)
@@ -432,7 +514,7 @@ export const getReturnHistory = async (req, res, next) => {
 
     const history = returns.map((ret) => ({
       returnId: ret._id.toString(),
-      date: ret.createdAt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }),
+      date: ret.createdAt ? ret.createdAt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : 'N/A',
       invoiceNumber: ret.invoiceId ? ret.invoiceId.invoiceNumber : 'N/A',
       productName: ret.productId ? ret.productId.productName : 'Unknown Product',
       quantity: ret.quantity,

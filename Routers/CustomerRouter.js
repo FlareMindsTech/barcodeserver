@@ -5,10 +5,13 @@
 
 import express from 'express';
 import {
+  getAllCustomers,
   createCustomer,
   updateCustomer,
   deleteCustomer,
   getCustomer,
+  getCustomerByPhoneNumber,
+  updateCustomerByPhoneNumber,
   getCustomerPurchaseHistory
 } from '../Controllers/CustomerController.js';
 import { authenticate, authorize } from '../Middlewares/index.js';
@@ -21,19 +24,28 @@ router.use(authenticate);
 // Authorize access to ADMIN and STAFF
 router.use(authorize(['ADMIN', 'STAFF']));
 
-// 1. Add Customer
+// 1. Get all customers
+router.get('/', getAllCustomers);
+
+// 2. Add Customer
 router.post('/', createCustomer);
 
-// 2. Get Customer Details (supports ID or mobile number lookup)
+// 3. Get Customer by phone number
+router.get('/phone/:mobile', getCustomerByPhoneNumber);
+
+// 4. Update customer by phone number
+router.put('/phone/:mobile', updateCustomerByPhoneNumber);
+
+// 5. Get Customer Details (supports ID or mobile number lookup)
 router.get('/:customerId', getCustomer);
 
-// 3. Update Customer Details
+// 6. Update Customer Details
 router.put('/:customerId', updateCustomer);
 
-// 4. Delete / Deactivate Customer
+// 7. Delete / Deactivate Customer
 router.delete('/:customerId', deleteCustomer);
 
-// 5. Get Customer Purchase History
+// 8. Get Customer Purchase History
 router.get('/:customerId/purchases', getCustomerPurchaseHistory);
 
 export default router;

@@ -9,6 +9,32 @@ import Bill from '../Models/Bill.js';
 import Invoice from '../Models/Invoice.js';
 
 /**
+ * 0. Get All Customers
+ * Endpoint: GET /api/customers
+ */
+export const getAllCustomers = async (req, res, next) => {
+  try {
+    const customers = await Customer.find({}).sort({ createdAt: -1 });
+
+    return res.status(200).json({
+      Success: true,
+      Message: 'Customers retrieved successfully.',
+      Result: customers.map((customer) => ({
+        customerId: customer._id.toString(),
+        customerName: customer.customerName,
+        mobile: customer.mobile,
+        status: customer.status,
+        createdAt: customer.createdAt,
+        updatedAt: customer.updatedAt
+      })),
+      StatusCode: 200
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
  * 1. Add Customer
  * Endpoint: POST /api/customers
  */
@@ -275,6 +301,150 @@ export const getCustomer = async (req, res, next) => {
         mobile: customer.mobile,
         registrationDate: customer.createdAt,
         status: customer.status
+      },
+      StatusCode: 200
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * 4b. Get Customer by Phone Number
+ * Endpoint: GET /api/customers/phone/:mobile
+ */
+export const getCustomerByPhoneNumber = async (req, res, next) => {
+  try {
+    const { mobile } = req.params;
+
+    if (!/^[0-9]{10}$/.test(mobile)) {
+      return res.status(400).json({
+        Success: false,
+        Message: 'Please enter a valid 10-digit mobile number.',
+        Result: null,
+        StatusCode: 400
+      });
+    }
+
+    const customer = await Customer.findOne({ mobile });
+    if (!customer) {
+      return res.status(404).json({
+        Success: false,
+        Message: 'Customer not found.',
+        Result: null,
+        StatusCode: 404
+      });
+    }
+
+    return res.status(200).json({
+      Success: true,
+      Message: 'Customer retrieved successfully.',
+      Result: {
+        customerId: customer._id.toString(),
+        customerName: customer.customerName,
+        mobile: customer.mobile,
+        registrationDate: customer.createdAt,
+        status: customer.status
+      },
+      StatusCode: 200
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * 4c. Update Customer by Phone Number
+ * Endpoint: PUT /api/customers/phone/:mobile
+ */
+export const updateCustomerByPhoneNumber = async (req, res, next) => {
+  try {
+    const { mobile } = req.params;
+    const { name, customerName, newMobile, status } = req.body;
+    const finalName = name || customerName;
+
+    if (!/^[0-9]{10}$/.test(mobile)) {
+      return res.status(400).json({
+        Success: false,
+        Message: 'Please enter a valid 10-digit mobile number.',
+        Result: null,
+        StatusCode: 400
+      });
+    }
+
+    const customer = await Customer.findOne({ mobile });
+    if (!customer) {
+      return res.status(404).json({
+        Success: false,
+        Message: 'Customer not found.',
+        Result: null,
+        StatusCode: 404
+      });
+    }
+
+    if (finalName !== undefined) {
+      if (finalName.trim().length < 2) {
+        return res.status(400).json({
+          Success: false,
+          Message: 'Customer name must be at least 2 characters long.',
+          Result: null,
+          StatusCode: 400
+        });
+      }
+      customer.customerName = finalName.trim();
+    }
+
+    if (newMobile !== undefined) {
+      if (!/^[0-9]{10}$/.test(newMobile)) {
+        return res.status(400).json({
+          Success: false,
+          Message: 'Please enter a valid 10-digit mobile number.',
+          Result: null,
+          StatusCode: 400
+        });
+      }
+
+      const duplicate = await Customer.findOne({
+        _id: { $ne: customer._id },
+        mobile: newMobile,
+        isDeleted: { $ne: true }
+      });
+      if (duplicate) {
+        return res.status(409).json({
+          Success: false,
+          Message: 'Another customer with this mobile number already exists.',
+          Result: null,
+          StatusCode: 409
+        });
+      }
+
+      customer.mobile = newMobile.trim();
+    }
+
+    if (status !== undefined) {
+      const allowedStatus = ['active', 'inactive'];
+      if (!allowedStatus.includes(status.toLowerCase())) {
+        return res.status(400).json({
+          Success: false,
+          Message: 'Invalid status. Allowed values: active, inactive',
+          Result: null,
+          StatusCode: 400
+        });
+      }
+      customer.status = status.toLowerCase();
+    }
+
+    await customer.save();
+
+    return res.status(200).json({
+      Success: true,
+      Message: 'Customer updated successfully.',
+      Result: {
+        customerId: customer._id.toString(),
+        customerName: customer.customerName,
+        mobile: customer.mobile,
+        status: customer.status,
+        updatedAt: customer.updatedAt
       },
       StatusCode: 200
     });

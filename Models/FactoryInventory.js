@@ -71,9 +71,8 @@ FactoryInventorySchema.index({ movementType: 1 });
 FactoryInventorySchema.index({ productId: 1, lastUpdated: -1 });
 
 // Pre-save hook: Automatically update the lastUpdated timestamp
-FactoryInventorySchema.pre('save', function (next) {
+FactoryInventorySchema.pre('save', function () {
   this.lastUpdated = new Date();
-  next();
 });
 
 const FactoryInventory = mongoose.model('FactoryInventory', FactoryInventorySchema);

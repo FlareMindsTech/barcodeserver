@@ -127,8 +127,15 @@ ProductSchema.index({ productName: 'text' }); // Full-text search for product na
 // Pre-save hook: Generate productId if not present
 ProductSchema.pre('save', async function () {
   if (this.isNew && !this.productId) {
-    const count = await mongoose.model('Product').estimatedDocumentCount();
-    this.productId = `PRD${String(count + 1).padStart(3, '0')}`;
+    const lastProduct = await mongoose.model('Product').findOne({}, { productId: 1 }, { sort: { createdAt: -1 } });
+    let nextNum = 1;
+    if (lastProduct && lastProduct.productId) {
+      const match = lastProduct.productId.match(/PRD(\d+)/);
+      if (match) {
+        nextNum = parseInt(match[1], 10) + 1;
+      }
+    }
+    this.productId = `PRD${String(nextNum).padStart(3, '0')}`;
   }
 });
 

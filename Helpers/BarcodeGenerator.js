@@ -4,6 +4,7 @@
  */
 
 import Product from '../Models/Product.js';
+import Barcode from '../Models/Barcode.js';
 
 /**
  * Generate a unique EAN-13 barcode
@@ -33,12 +34,14 @@ export const generateUniqueBarcode = async () => {
     const checkDigit = (10 - (sum % 10)) % 10;
     barcode = rawBarcode + checkDigit;
 
-    // Check uniqueness in database
+    // Check uniqueness in both Product and Barcode collections
     const existingProduct = await Product.findOne({ barcode });
-    if (!existingProduct) {
+    const existingBarcode = await Barcode.findOne({ barcodeNumber: barcode });
+    if (!existingProduct && !existingBarcode) {
       unique = true;
     }
   }
 
   return barcode;
 };
+
