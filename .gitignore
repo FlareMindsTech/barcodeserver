@@ -40,3 +40,4 @@ dump/
 # PM2
 .pm2/
 
+package-lock.json
