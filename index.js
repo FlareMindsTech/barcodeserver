@@ -38,7 +38,8 @@ const allowedOrigins = [
   'https://your-frontend-domain.com',
   'http://localhost:5173',
   'tauri://localhost',
-  'https://tauri.localhost'
+  'https://tauri.localhost',
+  'http://tauri.localhost'
 ];
 
 app.use(cors({
