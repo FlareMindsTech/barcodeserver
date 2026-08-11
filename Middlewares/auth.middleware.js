@@ -1,6 +1,7 @@
 import jwt from 'jsonwebtoken';
 import User from '../Models/User.js';
 import BlacklistedToken from '../Models/BlacklistedToken.js';
+import { getJwtSecret } from '../Helpers/AppEnv.js';
 
 export const authenticate = async (req, res, next) => {
   try {
@@ -27,7 +28,7 @@ export const authenticate = async (req, res, next) => {
       });
     }
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key-here');
+    const decoded = jwt.verify(token, getJwtSecret());
     
     // Fetch user from DB to verify existence and active status
     const user = await User.findById(decoded.userId);

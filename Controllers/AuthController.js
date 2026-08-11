@@ -6,6 +6,7 @@
 import jwt from 'jsonwebtoken';
 import User from '../Models/User.js';
 import BlacklistedToken from '../Models/BlacklistedToken.js';
+import { getJwtSecret } from '../Helpers/AppEnv.js';
 
 /**
  * Generate JWT access token for a user
@@ -17,7 +18,7 @@ const generateToken = (user) => {
       username: user.username,
       role: user.role
     },
-    process.env.JWT_SECRET || 'your-secret-key-here',
+    getJwtSecret(),
     { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
   );
 };
@@ -143,7 +144,21 @@ export const refreshToken = async (req, res, next) => {
     }
 
     const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key-here', { ignoreExpiration: true });
+
+    // Reject tokens that were invalidated at logout.
+    const blacklisted = await BlacklistedToken.findOne({ token });
+    if (blacklisted) {
+      return res.status(401).json({
+        Success: false,
+        Message: 'Invalid or expired token.',
+        Result: null,
+        StatusCode: 401
+      });
+    }
+
+    // Verify with the configured secret and WITHOUT ignoreExpiration, so an
+    // expired token is rejected instead of being silently refreshed forever.
+    const decoded = jwt.verify(token, getJwtSecret());
 
     const user = await User.findById(decoded.userId);
     if (!user || !user.isActive) {

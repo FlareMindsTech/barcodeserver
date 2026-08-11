@@ -14,6 +14,9 @@
  * - returnId: Required, Schema.Types.ObjectId.
  * - refundMethod: Required, enum ['cash', 'card', 'upi', 'store_credit'].
  * - amount: Required, min: 0.
+ * - direction: Required, enum ['to_customer', 'from_customer'] — records which
+ *   way money moved at the counter (we refunded the customer vs. customer paid us
+ *   extra on an exchange).
  * - transactionId: Optional, trimmed string.
  * - status: Required, enum ['pending', 'completed', 'failed'].
  * 
@@ -22,6 +25,7 @@
  *   "returnId": "60d0fe4f5311236168a109d6",
  *   "refundMethod": "upi",
  *   "amount": 499.50,
+ *   "direction": "to_customer",
  *   "transactionId": "TXN9876543210",
  *   "status": "completed",
  *   "processedAt": "2026-07-16T12:00:00.000Z"
@@ -51,6 +55,14 @@ const RefundSchema = new Schema(
       type: Number,
       required: [true, 'Refund amount is required'],
       min: [0, 'Refund amount cannot be negative']
+    },
+    direction: {
+      type: String,
+      enum: {
+        values: ['to_customer', 'from_customer'],
+        message: '{VALUE} is not a valid refund direction'
+      },
+      default: 'to_customer'
     },
     transactionId: {
       type: String,

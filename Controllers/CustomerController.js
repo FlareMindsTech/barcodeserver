@@ -43,8 +43,8 @@ export const createCustomer = async (req, res, next) => {
     const { name, customerName, mobile, status } = req.body;
     const finalName = name || customerName;
 
-    // Validate name and mobile presence
-    if (!finalName) {
+    // Validate name presence (mobile is optional for walk-in customers)
+    if (!finalName || !finalName.trim()) {
       return res.status(400).json({
         Success: false,
         Message: 'Customer name is required.',
@@ -53,41 +53,34 @@ export const createCustomer = async (req, res, next) => {
       });
     }
 
-    if (!mobile) {
-      return res.status(400).json({
-        Success: false,
-        Message: 'Mobile number is required.',
-        Result: null,
-        StatusCode: 400
-      });
-    }
+    if (mobile) {
+      // Validate mobile format (10-digit)
+      const mobileRegex = /^[0-9]{10}$/;
+      if (!mobileRegex.test(mobile)) {
+        return res.status(400).json({
+          Success: false,
+          Message: 'Please enter a valid 10-digit mobile number.',
+          Result: null,
+          StatusCode: 400
+        });
+      }
 
-    // Validate mobile format (10-digit)
-    const mobileRegex = /^[0-9]{10}$/;
-    if (!mobileRegex.test(mobile)) {
-      return res.status(400).json({
-        Success: false,
-        Message: 'Please enter a valid 10-digit mobile number.',
-        Result: null,
-        StatusCode: 400
-      });
-    }
-
-    // Check duplicate mobile
-    const existingCustomer = await Customer.findOne({ mobile, isDeleted: { $ne: true } });
-    if (existingCustomer) {
-      return res.status(409).json({
-        Success: false,
-        Message: 'A customer with this mobile number already exists.',
-        Result: null,
-        StatusCode: 409
-      });
+      // Check duplicate mobile
+      const existingCustomer = await Customer.findOne({ mobile, isDeleted: { $ne: true } });
+      if (existingCustomer) {
+        return res.status(409).json({
+          Success: false,
+          Message: 'A customer with this mobile number already exists.',
+          Result: null,
+          StatusCode: 409
+        });
+      }
     }
 
     // Save Customer
     const customer = new Customer({
       customerName: finalName.trim(),
-      mobile: mobile.trim(),
+      mobile: mobile ? mobile.trim() : undefined,
       status: status || 'active'
     });
     await customer.save();

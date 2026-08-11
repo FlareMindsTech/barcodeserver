@@ -8,47 +8,86 @@ import Invoice from '../Models/Invoice.js';
 import Bill from '../Models/Bill.js';
 import BillItem from '../Models/BillItem.js';
 import Customer from '../Models/Customer.js';
+import Sale from '../Models/Sale.js';
 import RetailInventory from '../Models/RetailInventory.js';
 import RetailStockMovement from '../Models/RetailStockMovement.js';
 import Product from '../Models/Product.js';
-import { generateInvoicePdfBuffer } from '../Helpers/PdfGenerator.js';
 
 import Settings from '../Models/Settings.js';
+import { generateInvoiceNumber } from '../Helpers/InvoiceNumberGenerator.js';
+import { retryOnDuplicate } from '../Helpers/Numbering.js';
 
 /**
- * Helper to generate sequential invoice number: [Prefix]-YYYYMMDD-SEQ
+ * Helper to build the full (JSON) invoice detail payload used by both the
+ * display endpoint and the print-data endpoint. Frontend renders its own PDF.
  */
-const generateInvoiceNumber = async () => {
-  const date = new Date();
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  const dateStr = `${year}${month}${day}`;
+const buildInvoiceDetails = async (invoice) => {
+  const bill = invoice.billId;
 
-  let invoicePrefix = 'INV';
-  const settings = await Settings.findOne();
-  if (settings && settings.invoicePrefix) {
-    invoicePrefix = settings.invoicePrefix.trim().replace(/-$/, '');
+  let customer = null;
+  if (bill && bill.customerId) {
+    customer = await Customer.findById(bill.customerId);
   }
 
-  const prefix = `${invoicePrefix}-${dateStr}-`;
+  const items = bill ? await BillItem.find({ billId: bill._id }).populate('productId') : [];
 
-  // Find invoices for today and sort descending
-  const latestInvoice = await Invoice.findOne({
-    invoiceNumber: new RegExp(`^${prefix}`)
-  }).sort({ invoiceNumber: -1 });
+  const formattedItems = items.map((item) => ({
+    itemId: item._id,
+    productId: item.productId ? item.productId._id : null,
+    productCode: item.productId ? item.productId.productId : null,
+    productName: item.productId ? item.productId.productName : 'Unknown Product',
+    size: item.productId ? item.productId.size : null,
+    color: item.productId ? item.productId.color : null,
+    quantity: item.quantity,
+    price: item.price,
+    gst: item.gst,
+    discount: item.discount,
+    total: item.total
+  }));
 
-  let nextSeq = 1;
-  if (latestInvoice) {
-    const parts = latestInvoice.invoiceNumber.split('-');
-    const seqStr = parts[parts.length - 1];
-    const seqNum = parseInt(seqStr, 10);
-    if (!isNaN(seqNum)) {
-      nextSeq = seqNum + 1;
-    }
-  }
+  const store = await Settings.findOne();
 
-  return `${prefix}${String(nextSeq).padStart(4, '0')}`; // Pad with 4 digits as per objective: INV-20260709-0001
+  return {
+    invoiceId: invoice._id.toString(),
+    invoiceNumber: invoice.invoiceNumber,
+    invoiceStatus: invoice.invoiceStatus,
+    createdAt: invoice.createdAt,
+    generatedBy: {
+      userId: invoice.generatedBy ? invoice.generatedBy._id : null,
+      username: invoice.generatedBy ? invoice.generatedBy.username : 'Unknown'
+    },
+    billDetails: {
+      billId: bill ? bill._id.toString() : null,
+      billNumber: bill ? bill.billNumber : 'N/A',
+      subtotal: bill ? bill.subtotal : 0,
+      gstAmount: bill ? bill.gstAmount : 0,
+      discountAmount: bill ? bill.discountAmount : 0,
+      grandTotal: bill ? bill.grandTotal : 0,
+      paymentMethod: bill ? bill.paymentMethod : 'N/A',
+      paymentStatus: bill ? bill.paymentStatus : 'N/A'
+    },
+    customerDetails: customer
+      ? {
+          customerId: customer._id.toString(),
+          customerName: customer.customerName,
+          mobile: customer.mobile
+        }
+      : {
+          customerName: 'Walk-in / Guest Customer',
+          mobile: 'N/A'
+        },
+    productList: formattedItems,
+    storeDetails: store
+      ? {
+          shopName: store.shopName,
+          shopAddress: store.shopAddress,
+          gstNumber: store.gstNumber || '',
+          contactNumber: store.contactNumber || '',
+          currency: store.currency,
+          defaultGstPercentage: store.gstPercentage
+        }
+      : null
+  };
 };
 
 /**
@@ -84,6 +123,18 @@ export const createInvoice = async (req, res, next) => {
       });
     }
 
+    // Invoice can only be created for a settled (paid) bill — creating one for an
+    // unpaid bill previously allowed stock to be "restored" on cancellation even
+    // though it was never deducted.
+    if (bill.paymentStatus !== 'paid') {
+      return res.status(400).json({
+        Success: false,
+        Message: 'Invoice can only be generated for a paid bill.',
+        Result: null,
+        StatusCode: 400
+      });
+    }
+
     // Check if an invoice already exists for this bill
     let invoice = await Invoice.findOne({ billId: bill._id });
     if (invoice) {
@@ -99,15 +150,19 @@ export const createInvoice = async (req, res, next) => {
       });
     }
 
-    // Generate invoice
-    const invoiceNumber = await generateInvoiceNumber();
-    invoice = new Invoice({
-      invoiceNumber,
-      billId: bill._id,
-      invoiceStatus: 'generated',
-      generatedBy: userId
+    // Generate invoice. Retry on a duplicate invoice-number race (E11000) with
+    // a freshly generated number each attempt.
+    const freshInvoice = await retryOnDuplicate(async () => {
+      const fresh = new Invoice({
+        invoiceNumber: await generateInvoiceNumber(),
+        billId: bill._id,
+        invoiceStatus: 'generated',
+        generatedBy: userId
+      });
+      await fresh.save();
+      return fresh;
     });
-    await invoice.save();
+    invoice = freshInvoice;
 
     return res.status(201).json({
       Success: true,
@@ -149,58 +204,7 @@ export const getInvoice = async (req, res, next) => {
       });
     }
 
-    const bill = invoice.billId;
-
-    // Get customer details
-    let customer = null;
-    if (bill && bill.customerId) {
-      customer = await Customer.findById(bill.customerId);
-    }
-
-    // Get item list
-    const items = await BillItem.find({ billId: bill._id }).populate('productId');
-
-    const formattedItems = items.map((item) => ({
-      itemId: item._id,
-      productId: item.productId ? item.productId._id : null,
-      productCode: item.productId ? item.productId.productId : null,
-      productName: item.productId ? item.productId.productName : 'Unknown Product',
-      quantity: item.quantity,
-      price: item.price,
-      gst: item.gst,
-      discount: item.discount,
-      total: item.total
-    }));
-
-    const result = {
-      invoiceId: invoice._id.toString(),
-      invoiceNumber: invoice.invoiceNumber,
-      invoiceStatus: invoice.invoiceStatus,
-      createdAt: invoice.createdAt,
-      generatedBy: {
-        userId: invoice.generatedBy ? invoice.generatedBy._id : null,
-        username: invoice.generatedBy ? invoice.generatedBy.username : 'Unknown'
-      },
-      billDetails: {
-        billId: bill._id.toString(),
-        billNumber: bill.billNumber,
-        subtotal: bill.subtotal,
-        gstAmount: bill.gstAmount,
-        discountAmount: bill.discountAmount,
-        grandTotal: bill.grandTotal,
-        paymentMethod: bill.paymentMethod,
-        paymentStatus: bill.paymentStatus
-      },
-      customerDetails: customer ? {
-        customerId: customer._id.toString(),
-        customerName: customer.customerName,
-        mobile: customer.mobile
-      } : {
-        customerName: 'Walk-in / Guest Customer',
-        mobile: 'N/A'
-      },
-      productList: formattedItems
-    };
+    const result = await buildInvoiceDetails(invoice);
 
     return res.status(200).json({
       Success: true,
@@ -309,6 +313,7 @@ export const getAllInvoices = async (req, res, next) => {
  * Endpoint: PUT /api/invoices/:invoiceId/cancel
  */
 export const cancelInvoice = async (req, res, next) => {
+  const session = await mongoose.startSession();
   try {
     const { invoiceId } = req.params;
     const { reason } = req.body;
@@ -317,69 +322,90 @@ export const cancelInvoice = async (req, res, next) => {
       ? { $or: [{ _id: invoiceId }, { invoiceNumber: invoiceId }] }
       : { invoiceNumber: invoiceId };
 
-    const invoice = await Invoice.findOne(query);
-    if (!invoice) {
-      return res.status(404).json({
-        Success: false,
-        Message: 'Invoice not found.',
-        Result: null,
-        StatusCode: 404
-      });
-    }
+    let resultPayload;
 
-    if (invoice.invoiceStatus === 'cancelled') {
-      return res.status(400).json({
-        Success: false,
-        Message: 'Invoice is already cancelled.',
-        Result: null,
-        StatusCode: 400
-      });
-    }
-
-    // 1. Mark Invoice as Cancelled
-    invoice.invoiceStatus = 'cancelled';
-    await invoice.save();
-
-    // 2. Also update associated Bill's paymentStatus if applicable
-    const bill = await Bill.findById(invoice.billId);
-    if (bill) {
-      bill.paymentStatus = 'unpaid'; // Marks bill unpaid on cancel
-      await bill.save();
-
-      // 3. Restore Retail Stock and log movement
-      const items = await BillItem.find({ billId: bill._id });
-      for (const item of items) {
-        await RetailInventory.adjustStock(item.productId, item.quantity);
-
-        const movement = new RetailStockMovement({
-          productId: item.productId,
-          movementType: 'adjustment',
-          quantity: item.quantity,
-          remarks: `Restored stock from cancelled invoice ${invoice.invoiceNumber}. Reason: ${reason || 'Not specified'}`
-        });
-        await movement.save();
+    await session.withTransaction(async () => {
+      const invoice = await Invoice.findOne(query).session(session);
+      if (!invoice) {
+        throw { statusCode: 404, message: 'Invoice not found.' };
       }
-    }
+
+      if (invoice.invoiceStatus === 'cancelled') {
+        throw { statusCode: 400, message: 'Invoice is already cancelled.' };
+      }
+
+      const bill = await Bill.findById(invoice.billId).session(session);
+      if (!bill) {
+        throw { statusCode: 404, message: 'Associated bill not found.' };
+      }
+
+      // 1. Mark Invoice as Cancelled
+      invoice.invoiceStatus = 'cancelled';
+      await invoice.save({ session });
+
+      // 2. Reconcile the sale ledger — the Sale row must not survive a cancelled
+      //    invoice, otherwise revenue/quantity reports keep counting it.
+      const sale = await Sale.findOneAndDelete({ invoiceId: invoice._id }).session(session);
+
+      // 3. Stock was only deducted for paid bills. Restore it ONLY in that case —
+      //    restoring for an unpaid bill would inflate stock.
+      const stockRestored = bill.paymentStatus === 'paid' || !!sale;
+      if (stockRestored) {
+        const items = await BillItem.find({ billId: bill._id }).session(session);
+        for (const item of items) {
+          await RetailInventory.adjustStock(item.productId, item.quantity, { session });
+
+          const movement = new RetailStockMovement({
+            productId: item.productId,
+            movementType: 'adjustment',
+            quantity: item.quantity,
+            remarks: `Restored stock from cancelled invoice ${invoice.invoiceNumber}. Reason: ${reason || 'Not specified'}`
+          });
+          await movement.save({ session });
+        }
+      }
+
+      // 4. Bill returns to unpaid only if it was paid (unpaid bills stay unpaid)
+      if (bill.paymentStatus === 'paid') {
+        bill.paymentStatus = 'unpaid';
+        await bill.save({ session });
+      }
+
+      resultPayload = {
+        invoiceNumber: invoice.invoiceNumber,
+        status: 'Cancelled',
+        stockRestored
+      };
+    });
 
     return res.status(200).json({
       Success: true,
-      Message: 'Invoice cancelled successfully and inventory restored.',
-      Result: {
-        invoiceNumber: invoice.invoiceNumber,
-        status: 'Cancelled'
-      },
+      Message: 'Invoice cancelled successfully.',
+      Result: resultPayload,
       StatusCode: 200
     });
   } catch (error) {
+    if (error && error.statusCode) {
+      return res.status(error.statusCode).json({
+        Success: false,
+        Message: error.message,
+        Result: null,
+        StatusCode: error.statusCode
+      });
+    }
     next(error);
+  } finally {
+    session.endSession();
   }
 };
 
 /**
- * 5. Download Invoice PDF
- * Endpoint: GET /api/invoices/:invoiceId/pdf
+ * 5. Get Invoice Print Data (JSON)
+ * Endpoint: GET /api/invoices/:invoiceId/print
+ * The backend does NOT render PDFs — it returns all data needed for the
+ * frontend to generate the PDF (invoice, bill, items, customer, store details).
  */
-export const downloadInvoicePdf = async (req, res, next) => {
+export const getInvoicePrintData = async (req, res, next) => {
   try {
     const { invoiceId } = req.params;
 
@@ -400,34 +426,14 @@ export const downloadInvoicePdf = async (req, res, next) => {
       });
     }
 
-    const bill = invoice.billId;
-    if (!bill) {
-      return res.status(400).json({
-        Success: false,
-        Message: 'Associated bill not found for this invoice.',
-        Result: null,
-        StatusCode: 400
-      });
-    }
+    const result = await buildInvoiceDetails(invoice);
 
-    // Get customer
-    let customer = null;
-    if (bill.customerId) {
-      customer = await Customer.findById(bill.customerId);
-    }
-
-    // Get items populated with product name
-    const items = await BillItem.find({ billId: bill._id }).populate('productId');
-
-    // Generate PDF Buffer
-    const pdfBuffer = await generateInvoicePdfBuffer(invoice, bill, items, customer);
-
-    // Set Response Headers for direct PDF download
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="Invoice_${invoice.invoiceNumber}.pdf"`);
-    res.setHeader('Content-Length', pdfBuffer.length);
-
-    return res.send(pdfBuffer);
+    return res.status(200).json({
+      Success: true,
+      Message: 'Invoice print data retrieved successfully.',
+      Result: result,
+      StatusCode: 200
+    });
   } catch (error) {
     next(error);
   }

@@ -2,17 +2,11 @@
  * @file ReturnExchangeController.js
  * @description Controller for Return, Exchange, and Refund Management operations.
  *
- * SCHEMA CHANGE REQUIRED (not included in this file, apply separately):
- *   Refund.js -> add a `direction` field:
- *     direction: {
- *       type: String,
- *       enum: ['to_customer', 'from_customer'],
- *       default: 'to_customer'
- *     }
- *   This lets one model represent both "we refunded the customer" (plain returns,
- *   and exchanges where the new item is cheaper) and "customer paid us extra"
- *   (exchanges where the new item is more expensive) without a payment gateway --
- *   it's just a ledger entry for money that already changed hands at the counter.
+ * The `direction` field on the Refund model ('to_customer' | 'from_customer') lets
+ * one model represent both "we refunded the customer" (plain returns, and exchanges
+ * where the new item is cheaper) and "customer paid us extra" (exchanges where the
+ * new item is more expensive) without a payment gateway — it's just a ledger entry
+ * for money that already changed hands at the counter.
  */
 
 import mongoose from 'mongoose';
@@ -78,6 +72,10 @@ export const returnProduct = async (req, res, next) => {
 
       if (invoice.invoiceStatus === 'cancelled') {
         throw { statusCode: 400, message: 'Cannot return products from a cancelled invoice.' };
+      }
+
+      if (!invoice.billId || invoice.billId.paymentStatus !== 'paid') {
+        throw { statusCode: 400, message: 'Products can only be returned from a paid (settled) invoice.' };
       }
 
       // 2. Verify Product
@@ -229,6 +227,10 @@ export const exchangeProduct = async (req, res, next) => {
 
       if (invoice.invoiceStatus === 'cancelled') {
         throw { statusCode: 400, message: 'Cannot exchange products from a cancelled invoice.' };
+      }
+
+      if (!invoice.billId || invoice.billId.paymentStatus !== 'paid') {
+        throw { statusCode: 400, message: 'Products can only be exchanged from a paid (settled) invoice.' };
       }
 
       // 2. Verify Old Product

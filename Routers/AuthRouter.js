@@ -6,11 +6,12 @@
 import express from 'express';
 import { login, logout, refreshToken } from '../Controllers/AuthController.js';
 import { authenticate } from '../Middlewares/auth.middleware.js';
+import { loginRateLimiter } from '../Middlewares/rate.limit.middleware.js';
 
 const router = express.Router();
 
 // Public Routes
-router.post('/login', login);
+router.post('/login', loginRateLimiter, login);
 router.post('/logout', authenticate, logout);
 router.post('/refresh-token', refreshToken);
 

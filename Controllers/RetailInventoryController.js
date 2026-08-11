@@ -8,9 +8,18 @@ import Product from '../Models/Product.js';
 import RetailInventory from '../Models/RetailInventory.js';
 import RetailStockMovement from '../Models/RetailStockMovement.js';
 import StockTransfer from '../Models/StockTransfer.js';
+import FactoryInventory from '../Models/FactoryInventory.js';
+import { deductFactoryStock } from '../Helpers/FactoryStockManager.js';
 
 /**
  * Receive Stock (POST /api/retail-inventory/receive)
+ *
+ * Two supported flows:
+ *   a) transferId provided — completes a PENDING Factory→Retail transfer. The
+ *      factory balance was already debited at dispatch, so this only credits
+ *      retail and marks the transfer completed.
+ *   b) no transferId — direct manual receipt; a guard debits the factory
+ *      balance at the same time retail is credited.
  */
 export const receiveStock = async (req, res, next) => {
   try {
@@ -46,53 +55,98 @@ export const receiveStock = async (req, res, next) => {
       });
     }
 
-    let remarksText = 'Received from Factory';
+    let transfer = null;
 
-    // If transferId is provided, validate the transfer log
+    // If transferId is provided, validate the transfer record strictly.
     if (transferId) {
-      const transferQuery = mongoose.Types.ObjectId.isValid(transferId)
-        ? { _id: transferId }
-        : { remarks: { $regex: new RegExp(transferId, 'i') } }; // Or direct lookup if it matches custom ID
-      
-      const transfer = await StockTransfer.findOne({
-        $or: [
-          mongoose.Types.ObjectId.isValid(transferId) ? { _id: transferId } : null,
-          { _id: mongoose.Types.ObjectId.isValid(transferId) ? transferId : new mongoose.Types.ObjectId() } // fallback
-        ].filter(Boolean)
-      });
-
-      if (transfer) {
-        if (transfer.productId.toString() !== product._id.toString()) {
-          return res.status(400).json({
-            Success: false,
-            Message: 'Transfer Product ID does not match the received Product ID.',
-            StatusCode: 400
-          });
-        }
-        if (transfer.status !== 'pending') {
-          return res.status(400).json({
-            Success: false,
-            Message: `Stock transfer is already ${transfer.status}.`,
-            StatusCode: 400
-          });
-        }
-
-        // Update transfer status
-        transfer.status = 'completed';
-        await transfer.save();
-        remarksText = `Received from Factory. Transfer ID: ${transfer._id}`;
+      if (!mongoose.Types.ObjectId.isValid(transferId)) {
+        return res.status(400).json({
+          Success: false,
+          Message: 'Invalid Transfer ID.',
+          StatusCode: 400
+        });
       }
+
+      transfer = await StockTransfer.findById(transferId);
+      if (!transfer) {
+        return res.status(404).json({
+          Success: false,
+          Message: 'Stock transfer record not found.',
+          StatusCode: 404
+        });
+      }
+
+      if (transfer.status !== 'pending') {
+        return res.status(400).json({
+          Success: false,
+          Message: `Cannot receive stock: transfer is already ${transfer.status}.`,
+          StatusCode: 400
+        });
+      }
+
+      if (!(transfer.fromLocation === 'Factory' && transfer.toLocation === 'Retail')) {
+        return res.status(400).json({
+          Success: false,
+          Message: 'Transfer is not a Factory-to-Retail stock transfer.',
+          StatusCode: 400
+        });
+      }
+
+      if (transfer.productId.toString() !== product._id.toString()) {
+        return res.status(400).json({
+          Success: false,
+          Message: 'Transfer product does not match the product being received.',
+          StatusCode: 400
+        });
+      }
+
+      if (transfer.quantity !== quantity) {
+        return res.status(400).json({
+          Success: false,
+          Message: `Transfer quantity is ${transfer.quantity} but you specified ${quantity}.`,
+          StatusCode: 400
+        });
+      }
+
+      // Factory was debited at dispatch time — nothing more to take from factory.
+    } else {
+      // Manual receipt without a transfer: debit the factory balance with a
+      // guarded atomic update so we never credit retail stock that the factory
+      // does not actually hold.
+      const deducted = await deductFactoryStock(product._id, quantity);
+      if (!deducted) {
+        return res.status(400).json({
+          Success: false,
+          Message: 'Insufficient Factory Stock to fulfill this receipt.',
+          StatusCode: 400
+        });
+      }
+
+      // Record the factory outward movement (audit ledger)
+      const factoryMovement = new FactoryInventory({
+        productId: product._id,
+        quantity,
+        movementType: 'outward',
+        remarks: 'Manual transfer to Retail'
+      });
+      await factoryMovement.save();
     }
 
-    // Increase retail stock using helper
+    // Increase retail stock
     await RetailInventory.adjustStock(product._id, quantity);
 
-    // Record stock movement history
+    // Mark the transfer completed
+    if (transfer) {
+      transfer.status = 'completed';
+      await transfer.save();
+    }
+
+    // Record retail stock movement history
     const movement = new RetailStockMovement({
       productId: product._id,
       movementType: 'received',
       quantity,
-      remarks: remarksText
+      remarks: transfer ? `Received from Factory. Transfer ID: ${transfer._id}` : 'Received from Factory'
     });
     await movement.save();
 
@@ -105,6 +159,10 @@ export const receiveStock = async (req, res, next) => {
     return res.status(200).json({
       Success: true,
       Message: 'Stock received successfully.',
+      Result: {
+        transferId: transfer ? transfer._id.toString() : null,
+        transferStatus: transfer ? transfer.status : null
+      },
       StatusCode: 200
     });
   } catch (error) {

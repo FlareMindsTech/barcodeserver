@@ -84,11 +84,14 @@ RetailInventorySchema.pre('save', function () {
 });
 
 // Static method to update product stock quantity
-RetailInventorySchema.statics.adjustStock = function (productId, delta) {
+// Accepts optional `options.session` so callers can run the mutation inside a
+// transaction (returns/exchanges/billing). Without it the stock edit would
+// silently fall outside the transaction and break atomicity.
+RetailInventorySchema.statics.adjustStock = function (productId, delta, options = {}) {
   return this.findOneAndUpdate(
     { productId },
     { $inc: { quantity: delta } },
-    { new: true, upsert: true, runValidators: true }
+    { new: true, upsert: true, runValidators: true, session: options.session || null }
   );
 };
 
